@@ -24,8 +24,20 @@ local date_format = vim.g.gitblame_date_format
 ---@type boolean
 local date_format_has_relative_time
 
+---@type boolean
+local is_blame_info_available = false
+
+---@type boolean
+local print_virtual_text = true
+
+local current_blame_text = nil
+
 local function clear_virtual_text()
     vim.api.nvim_buf_del_extmark(0, NAMESPACE_ID, 1)
+end
+
+local function is_blame_available()
+    return is_blame_info_available
 end
 
 ---@param blames table[]
@@ -124,11 +136,11 @@ local function format_date(date)
 end
 
 ---@param filepath string
----@param linenumber number
-local function get_blame_info(filepath, linenumber)
+---@param line_number number
+local function get_blame_info(filepath, line_number)
     local info
     for _, v in ipairs(files_data[filepath].blames) do
-        if linenumber >= v.startline and linenumber <= v.endline then
+        if line_number >= v.startline and line_number <= v.endline then
             info = v
             break
         end
@@ -136,16 +148,34 @@ local function get_blame_info(filepath, linenumber)
     return info
 end
 
----@param blame_info table
----@param callback fun(blame_text: string)
-local function get_blame_text(filepath, blame_info, callback)
-    local info = blame_info
-    local isBlameInfoAvailable = info and info.author and info.date and
-                                     info.committer and info.committer_date and
-                                     info.author ~= 'Not Committed Yet'
+local function print_blame_text(line_number)
+    clear_virtual_text()
 
-    local notCommitedBlameText = '  Not Committed Yet'
-    if isBlameInfoAvailable then
+    if current_blame_text then
+        local options = {id = 1, virt_text = {{blame_text, 'gitblame'}}}
+        local user_options = vim.g.gitblame_set_extmark_options or {}
+        if type(user_options) == 'table' then
+            utils.merge_map(user_options, options)
+        elseif user_options then
+            utils.log('gitblame_set_extmark_options should be a table')
+        end
+
+        vim.api.nvim_buf_set_extmark(0, NAMESPACE_ID, line_number - 1, 0, options)
+    end
+end
+
+---@param blame_info table
+local function get_blame_text(filepath, blame_info)
+    local info = blame_info
+    is_blame_info_available = info 
+        and info.author 
+        and info.date 
+        and info.committer 
+        and info.committer_date
+        and info.author ~= 'Not Committed Yet'
+
+    local not_commited_blame_text = '  Not Committed Yet'
+    if is_blame_info_available then
         local blame_text = vim.g.gitblame_message_template
         blame_text = blame_text:gsub('<author>',
                                      info.author == current_author and 'You' or
@@ -158,21 +188,20 @@ local function get_blame_text(filepath, blame_info, callback)
         blame_text = blame_text:gsub('<date>', format_date(info.date))
         blame_text = blame_text:gsub('<summary>', info.summary)
         blame_text = blame_text:gsub('<sha>', string.sub(info.sha, 1, 7))
-        callback(blame_text)
+
+        return blame_text
     elseif #files_data[filepath].blames > 0 then
-        callback(notCommitedBlameText)
+        return not_commited_blame_text
     else
-        git.check_is_ignored(function(is_ignored)
-            callback(not is_ignored and notCommitedBlameText or nil)
-        end)
+        return nil
     end
 end
 
 local function show_blame_info()
     local filepath = utils.get_filepath()
-    local line = utils.get_line_number()
+    local line_number = utils.get_line_number()
 
-    if last_position.filepath == filepath and last_position.line == line then
+    if last_position.filepath == filepath and last_position.line_number == line_number then
         if not need_update_after_horizontal_move then
             return
         else
@@ -191,25 +220,13 @@ local function show_blame_info()
     end
 
     last_position.filepath = filepath
-    last_position.line = line
+    last_position.line_number = line_number
 
-    local info = get_blame_info(filepath, line)
-    get_blame_text(filepath, info, function(blame_text)
-        clear_virtual_text()
-
-        if blame_text then
-            local options = {id = 1, virt_text = {{blame_text, 'gitblame'}}}
-            local user_options = vim.g.gitblame_set_extmark_options or {}
-            if type(user_options) == 'table' then
-                utils.merge_map(user_options, options)
-            elseif user_options then
-                utils.log('gitblame_set_extmark_options should be a table')
-            end
-
-            vim.api.nvim_buf_set_extmark(0, NAMESPACE_ID, line - 1, 0, options)
-        end
-    end)
-
+    local info = get_blame_info(filepath, line_number)
+    current_blame_text = get_blame_text(filepath, info)
+    if vim.g.gitblame_print_virtual_text then
+        print_blame_text(line_number)
+    end
 end
 
 local function cleanup_file_data()
@@ -246,9 +263,9 @@ local function handle_text_changed()
     local filepath = utils.get_filepath()
     if not filepath then return end
 
-    local line = utils.get_line_number()
+    local line_number = utils.get_line_number()
 
-    if last_position.filepath == filepath and last_position.line == line then
+    if last_position.filepath == filepath and last_position.line_number == line_number then
         need_update_after_horizontal_move = true
     end
 
@@ -270,6 +287,10 @@ local function open_commit_url()
     if sha and sha ~= empty_sha then git.open_commit_in_browser(sha) end
 end
 
+local function get_current_blame_text()
+    return current_blame_text
+end
+
 return {
     init = init,
     show_blame_info = show_blame_info,
@@ -280,5 +301,8 @@ return {
     handle_buf_enter = handle_buf_enter,
     handle_text_changed = handle_text_changed,
     handle_insert_leave = handle_insert_leave,
-    open_commit_url = open_commit_url
+    open_commit_url = open_commit_url,
+    is_blame_info_available = is_blame_info_available,
+    is_blame_available = is_blame_available,
+    get_current_blame_text = get_current_blame_text
 }
